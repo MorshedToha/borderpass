@@ -1,0 +1,268 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// prisma/schema.prisma
+// Production-ready schema for BOrderpass AI Visa Interview Simulator
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  STUDENT
+  ADMIN
+}
+
+enum SubscriptionPlan {
+  FREE
+  PRO
+  PREMIUM
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  TRIALING
+  INCOMPLETE
+}
+
+enum InterviewStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  ABORTED
+}
+
+enum InterviewMode {
+  TEXT
+  VOICE
+}
+
+enum RiskLevel {
+  LOW
+  MODERATE
+  HIGH
+}
+
+enum SpeakerType {
+  STUDENT
+  AI
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USER MODEL
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  password      String?   // hashed, nullable for OAuth users
+  role          UserRole  @default(STUDENT)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  accounts         Account[]
+  sessions         Session[]
+  subscription     Subscription?
+  interviewSessions InterviewSession[]
+  scores           Score[]
+
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEXT-AUTH ADAPTER MODELS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUBSCRIPTION MODEL
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  userId               String             @unique
+  plan                 SubscriptionPlan   @default(FREE)
+  status               SubscriptionStatus @default(ACTIVE)
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  stripePriceId        String?
+  stripeCurrentPeriodEnd DateTime?
+  interviewsUsed       Int                @default(0)
+  interviewsLimit      Int                @default(1) // 1 for FREE, 10 for PRO, -1 for PREMIUM
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COUNTRY MODEL
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Country {
+  id          String   @id @default(cuid())
+  name        String   @unique  // e.g. "United States"
+  code        String   @unique  // e.g. "USA"
+  flag        String            // emoji or URL
+  vapiAssistantId String?       // Country-specific Vapi AI assistant
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  // Relations
+  interviewSessions InterviewSession[]
+  questions         Question[]
+
+  @@map("countries")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QUESTION BANK MODEL
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Question {
+  id          String   @id @default(cuid())
+  countryId   String
+  category    String   // e.g. "financial", "study_intent", "return_intent"
+  text        String   @db.Text
+  difficulty  Int      @default(1) // 1-5
+  isActive    Boolean  @default(true)
+  tags        String[] // e.g. ["visa-type:F1", "bank-balance"]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  country Country @relation(fields: [countryId], references: [id], onDelete: Cascade)
+
+  @@map("questions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INTERVIEW SESSION MODEL
+// ─────────────────────────────────────────────────────────────────────────────
+
+model InterviewSession {
+  id          String          @id @default(cuid())
+  userId      String
+  countryId   String
+  mode        InterviewMode   @default(VOICE)
+  status      InterviewStatus @default(PENDING)
+  vapiCallId  String?         // Vapi call reference
+  wsSessionId String?         // WebSocket session reference
+  startedAt   DateTime?
+  endedAt     DateTime?
+  durationSecs Int?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  // Relations
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  country     Country     @relation(fields: [countryId], references: [id])
+  transcripts Transcript[]
+  score       Score?
+
+  @@index([userId])
+  @@index([countryId])
+  @@map("interview_sessions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRANSCRIPT MODEL
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Transcript {
+  id          String      @id @default(cuid())
+  sessionId   String
+  speaker     SpeakerType
+  text        String      @db.Text
+  timestamp   Int         // seconds from session start
+  confidence  Float?      // speech recognition confidence 0-1
+  isFinal     Boolean     @default(false) // streaming vs final transcript
+  createdAt   DateTime    @default(now())
+
+  session InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("transcripts")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCORE MODEL
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Score {
+  id                    String    @id @default(cuid())
+  sessionId             String    @unique
+  userId                String
+  overallScore          Int       // 0-100
+  riskLevel             RiskLevel
+  financialCredibility  Int       // 0-100
+  studyIntent           Int       // 0-100
+  returnIntent          Int       // 0-100
+  confidenceScore       Int       // 0-100
+  consistencyScore      Int       // 0-100
+  weakAreas             String[]  // e.g. ["financial_credibility", "return_intent"]
+  feedback              String?   @db.Text
+  aiAnalysis            Json?     // raw AI scoring breakdown
+  createdAt             DateTime  @default(now())
+
+  session InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("scores")
+}
